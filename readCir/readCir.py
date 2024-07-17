@@ -1,44 +1,54 @@
 import serial
 import matplotlib.pyplot as plt
-import matplotlib.animation as animation
+import numpy as np
 
-# 시리얼 포트 설정 (ESP32가 연결된 포트로 변경)
+# 시리얼 포트 설정 (포트 이름을 실제 사용 중인 포트로 변경)
 ser = serial.Serial('COM5', 115200, timeout=1)
 
-real_values = []
-imag_values = []
-amplitude = []
+# 데이터 저장을 위한 리스트 초기화
+real_parts = []
+imaginary_parts = []
+magnitudes = []
+samples = []
 
-fig, ax = plt.subplots()
-line, = ax.plot([], [], lw=2)
-ax.set_ylim(0, 5000)  # y축 범위를 데이터에 맞게 설정하세요
-ax.set_xlim(0, 992)
-ax.grid()
-
-def init():
-    line.set_data([], [])
-    return line,
-
-def update(data):
-    real, imag = data
-    real_values.append(real)
-    imag_values.append(imag)
-    if len(real_values) > 992:
-        real_values.pop(0)
-        imag_values.pop(0)
-    amplitude = [((r**2 + i**2)**0.5) for r, i in zip(real_values, imag_values)]
-    line.set_data(range(len(real_values)), amplitude)
-    return line,
-
-def data_gen():
+# 데이터 읽기 함수
+def read_serial_data():
     while True:
-        line = ser.readline().decode('utf-8').strip()
-        if line:
-            try:
-                real, imag = map(int, line.split(','))
-                yield real, imag
-            except ValueError:
-                continue
+        try:
+            line = ser.readline().decode('utf-8', errors='ignore').strip()
+            if line:
+                parts = line.split(',')
+                if len(parts) == 3:
+                    sample = int(parts[0])
+                    real_part = int(parts[1], 16)
+                    imaginary_part = int(parts[2], 16)
+                    
+                    samples.append(sample)
+                    real_parts.append(real_part)
+                    imaginary_parts.append(imaginary_part)
+                    
+                    # magnitude 계산
+                    magnitude = np.sqrt(real_part**2 + imaginary_part**2)
+                    magnitudes.append(magnitude)
+                    
+                    print(f"Sample {sample}: Real Part = {real_part}, Imaginary Part = {imaginary_part}, Magnitude = {magnitude}")
+                    
+                    if len(samples) >= 1016:  # 원하는 샘플 수를 다 읽으면 종료
+                        break
+        except Exception as e:
+            print(f"Error reading line: {e}")
 
-ani = animation.FuncAnimation(fig, update, data_gen, init_func=init, blit=True, interval=50)
+# 데이터 읽기
+read_serial_data()
+
+# 시리얼 포트 닫기
+ser.close()
+
+# 플롯 그리기
+plt.figure(figsize=(12, 6))
+plt.plot(samples, magnitudes, label='Magnitude')
+plt.xlabel('Sample Index')
+plt.ylabel('Magnitude')
+plt.title('CIR Data Magnitude')
+plt.legend()
 plt.show()
