@@ -39,7 +39,7 @@ static uint8_t rx_buffer[20];
 static uint32_t status_reg = 0;
 static double tof;
 static double distance;
-extern dwt_txconfig_t txconfig_options_ch9;
+extern dwt_txconfig_t txconfig_options;
 
 void setup()
 {
@@ -60,7 +60,8 @@ void setup()
   if (dwt_initialise(DWT_DW_INIT) == DWT_ERROR)
   {
     UART_puts("INIT FAILED\r\n");
-    while (1) ;
+    while (1)
+      ;
   }
 
   // Enabling LEDs here for debug so that for each TX the D1 LED will flash on DW3000 red eval-shield boards.
@@ -70,11 +71,12 @@ void setup()
   if (dwt_configure(&config)) // if the dwt_configure returns DWT_ERROR either the PLL or RX calibration has failed the host should reset the device
   {
     UART_puts("CONFIG FAILED\r\n");
-    while (1) ;
+    while (1)
+      ;
   }
 
   /* Configure the TX spectrum parameters (power, PG delay and PG count) */
-  dwt_configuretxrf(&txconfig_options_ch9);
+  dwt_configuretxrf(&txconfig_options);
 
   /* Apply default antenna delay value. See NOTE 2 below. */
   dwt_setrxantennadelay(RX_ANT_DLY);
@@ -89,14 +91,12 @@ void setup()
    * Note, in real low power applications the LEDs should not be used. */
   dwt_setlnapamode(DWT_LNA_ENABLE | DWT_PA_ENABLE);
 
-  Serial.begin(115200);
   Serial.println("Range RX");
   Serial.println("Setup over........");
 }
 
 void loop()
 {
-  Serial.println(frame_seq_nb);
   /* Write frame data to DW IC and prepare transmission. See NOTE 7 below. */
   tx_poll_msg[ALL_MSG_SN_IDX] = frame_seq_nb;
   dwt_write32bitreg(SYS_STATUS_ID, SYS_STATUS_TXFRS_BIT_MASK);
@@ -109,7 +109,8 @@ void loop()
 
   /* We assume that the transmission is achieved correctly, poll for reception of a frame or error/timeout. See NOTE 8 below. */
   while (!((status_reg = dwt_read32bitreg(SYS_STATUS_ID)) & (SYS_STATUS_RXFCG_BIT_MASK | SYS_STATUS_ALL_RX_TO | SYS_STATUS_ALL_RX_ERR)))
-  { };
+  {
+  };
 
   /* Increment frame sequence number after transmission of the poll message (modulo 256). */
   frame_seq_nb++;
@@ -157,21 +158,6 @@ void loop()
         /* Display computed distance on LCD. */
         snprintf(dist_str, sizeof(dist_str), "DIST: %3.2f m", distance);
         test_run_info((unsigned char *)dist_str);
-
-                  dwt_readaccdata(buffer, length, accOffset);
-
-          // 데이터 출력 (더미 바이트를 무시하고 데이터 출력)
-          for (int i = 1; i < length; i += 6) {
-              Serial.print(accOffset + (i - 1) / 6);
-              Serial.print(",");
-              int32_t real_part = (int32_t)((buffer[i] << 16) | (buffer[i + 1] << 8) | buffer[i + 2]);
-              if (real_part & 0x800000) real_part |= 0xFF000000; // 부호 확장
-              Serial.print(real_part);
-              Serial.print(",");
-              int32_t imag_part = (int32_t)((buffer[i + 3] << 16) | (buffer[i + 4] << 8) | buffer[i + 5]);
-              if (imag_part & 0x800000) imag_part |= 0xFF000000; // 부호 확장
-              Serial.println(imag_part);
-}
       }
     }
   }
