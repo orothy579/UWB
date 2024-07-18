@@ -20,8 +20,8 @@ def read_serial_data():
                 parts = line.split(',')
                 if len(parts) == 3:
                     sample = int(parts[0])
-                    real_part = int(parts[1], 16)
-                    imaginary_part = int(parts[2], 16)
+                    real_part = int(parts[1])
+                    imaginary_part = int(parts[2])
                     
                     samples.append(sample)
                     real_parts.append(real_part)
