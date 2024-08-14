@@ -6,6 +6,16 @@ import numpy as np
 from scipy.optimize import least_squares
 import logging
 import requests
+TIMESTAMP_CONVERSION_FACTOR = 1 / (128 * 499.2 * 10**6)
+
+
+anchor_id_map = {
+    'anchor1': 0,
+    'anchor2': 1,
+    'anchor3': 2,
+    'anchor4': 3
+}
+
 
 # Flask 애플리케이션 설정
 app = Flask(__name__)
@@ -163,14 +173,14 @@ def update_clock_model(anchor_id, sync_timestamps):
     k = ts_n_k.sequence_number
     k_minus_1 = ts_n_k_minus_1.sequence_number
     
-    tau_s = 103 * 10**-3
+    tau_s = int(200 * 10**-3 / TIMESTAMP_CONVERSION_FACTOR)
 
     delta_k = k - k_minus_1
     tr_k = k * tau_s
     tr_k_minus_1 = k_minus_1 * tau_s
 
-    E_n_k = ts_n_k.timestamp * 15.65 * 10**-12 - tr_k
-    E_n_k_minus_1 = ts_n_k_minus_1.timestamp * 15.65 * 10**-12 - tr_k_minus_1
+    E_n_k = ts_n_k.timestamp - tr_k
+    E_n_k_minus_1 = ts_n_k_minus_1.timestamp  - tr_k_minus_1
     
     i_n_k = (E_n_k - E_n_k_minus_1) / (delta_k * tau_s)
 
@@ -193,17 +203,9 @@ def calculate_positioning_timestamp(anchor_id, tag_timestamp, sync_timestamps):
 
     ts_n_k = sync_timestamps[0]
 
-    # tag_seq_num = tag_timestamp.sequence_number
-    tag_time_in_seconds = tag_timestamp.timestamp * 15.65 * 10**-12
-    sync_time_in_seconds = ts_n_k.timestamp * 15.65 * 10**-12
+    E_n_i = clock_model.offset + clock_model.drift * (tag_timestamp.timestamp - ts_n_k.timestamp)
 
-    # app.logger.debug(f"tag_time_in_seconds for anchor {anchor_id}: {tag_time_in_seconds}")
-    # app.logger.debug(f"sync_time_in_seconds for anchor {anchor_id}: {sync_time_in_seconds}")
-
-
-    E_n_i = clock_model.offset + clock_model.drift * (tag_time_in_seconds - sync_time_in_seconds)
-
-    corrected_timestamp = tag_time_in_seconds - E_n_i
+    corrected_timestamp = tag_timestamp.timestamp - E_n_i
     # app.logger.debug(f"Calculated E_n_i for anchor {anchor_id}: {E_n_i}")
     app.logger.debug(f"Calculated corrected timestamp for anchor {anchor_id}: {corrected_timestamp}")
 
@@ -212,7 +214,6 @@ def calculate_positioning_timestamp(anchor_id, tag_timestamp, sync_timestamps):
 @app.route('/api/calculate_position', methods=['POST'])
 def calculate_position():
     tag_data = request.get_json()
-    # app.logger.debug(f"Received tag data: {tag_data}")
 
     if not tag_data or not isinstance(tag_data.get('timestamps'), dict):
         app.logger.error("Invalid data provided")
@@ -221,7 +222,9 @@ def calculate_position():
     tag_timestamps = tag_data.get('timestamps')
     tag_id = tag_data.get('tag_id')
 
-    corrected_timestamps = []
+    # Anchor ID의 수에 맞게 리스트 초기화
+    corrected_timestamps = [None] * len(anchor_id_map)
+
     for anchor_id, ts in tag_timestamps.items():
         tag_timestamp = Timestamp.query.filter_by(anchor_id=anchor_id, frame_type='tag').order_by(Timestamp.id.desc()).first()
         if tag_timestamp is None:
@@ -231,20 +234,30 @@ def calculate_position():
         sync_timestamps = Timestamp.query.filter_by(anchor_id=anchor_id, frame_type='sync').order_by(Timestamp.id.desc()).limit(2).all()
 
         corrected_timestamp = calculate_positioning_timestamp(anchor_id, tag_timestamp, sync_timestamps)
+
+        # 올바른 인덱스에 저장
+        anchor_index = anchor_id_map.get(anchor_id)
+        if anchor_index is not None and 0 <= anchor_index < len(corrected_timestamps):
+            corrected_timestamps[anchor_index] = corrected_timestamp
+        else:
+            app.logger.error(f"Invalid anchor index {anchor_index} for anchor_id {anchor_id}")
+            return jsonify({'message': f'Invalid anchor index for anchor_id {anchor_id}'}), 400
+        
         if not np.isfinite(corrected_timestamp):
             app.logger.error(f"Corrected timestamp for anchor {anchor_id} is not finite: {corrected_timestamp}")
             return jsonify({'message': f'Corrected timestamp for anchor {anchor_id} is not finite'}), 400
 
-        corrected_timestamps.append(corrected_timestamp)
+    # check if all timestamps were filled
+    if None in corrected_timestamps:
+        app.logger.error("Not all anchors have provided timestamps")
+        return jsonify({'message': 'Missing timestamps for some anchors'}), 400
 
     estimated_position = estimate_position(corrected_timestamps)
     x, y = estimated_position.tolist()
-    # app.logger.debug(f"Estimated position: {estimated_position}")
 
     new_tag_position = TagPosition(tag_id=tag_id, x=x, y=y, timestamp=int(datetime.datetime.now().timestamp()))
     db.session.add(new_tag_position)
     db.session.commit()
-    # app.logger.debug(f"Saved new tag position: {new_tag_position}")
 
     return jsonify({'estimated_position': [x, y]}), 200
 
@@ -255,14 +268,12 @@ def h(si, corrected_timestamps):
 
     for n in range(1, len(corrected_timestamps)):
         tn_i = corrected_timestamps[n]
-        rho_n_i = np.sqrt((anchor_positions[n][0] - si[0])**2 + (anchor_positions[n][1] - si[1])**2)
-        rho_1_i = np.sqrt((anchor_positions[0][0] - si[0])**2 + (anchor_positions[0][1] - si[1])**2)
-
-        if rho_n_i == 0 or rho_1_i == 0:
-            app.logger.error(f"Rho value is zero for anchor {n}")
-            raise ValueError("Rho value is zero")
-
-        h_vec.append(c * (tn_i - t1_i) - (rho_n_i - rho_1_i))
+        diff = (tn_i - t1_i)* TIMESTAMP_CONVERSION_FACTOR
+        # print(diff)
+        # app.logger.debug(f"tn_i  anchor {n+1}: {tn_i}")
+        # app.logger.debug(f"t1_i for anchor {n+1}: {t1_i}")
+        # app.logger.debug(f"Time difference (tn_i - t1_i) for anchor {n+1}: {tn_i - t1_i}")
+        h_vec.append(c * diff )
 
     # app.logger.debug(f"h vector: {h_vec}")
     return np.array(h_vec)
@@ -295,7 +306,6 @@ def ekf_update(si, corrected_timestamps):
     h_si = h(si, corrected_timestamps)
     
     residual = h_si - np.dot(H, si)
-    # app.logger.debug(f"Residual: {residual}")
     return residual
 
 def estimate_position(corrected_timestamps):
