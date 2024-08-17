@@ -1,11 +1,18 @@
+import matplotlib
+matplotlib.use('Agg') 
+
 import pytz
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, render_template
 from flask_sqlalchemy import SQLAlchemy
 import datetime
 import numpy as np
 from scipy.optimize import least_squares
 import logging
 import requests
+import matplotlib.pyplot as plt
+import io
+import base64
+
 TIMESTAMP_CONVERSION_FACTOR = 1 / (128 * 499.2 * 10**6)
 
 
@@ -16,24 +23,20 @@ anchor_id_map = {
     'anchor4': 3
 }
 
-
-# Flask 애플리케이션 설정
 app = Flask(__name__)
 app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///tdoa.db'
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 
-# 로거 설정
 logging.basicConfig(level=logging.DEBUG)
 app.logger.setLevel(logging.DEBUG)
 
-# SQLAlchemy 인스턴스 생성
 db = SQLAlchemy(app)
 
 class Timestamp(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     anchor_id = db.Column(db.String(50))
     timestamp = db.Column(db.BigInteger)
-    frame_type = db.Column(db.String(50))  # 'sync' or 'tag'
+    frame_type = db.Column(db.String(50))  
     sequence_number = db.Column(db.Integer)
     received_at = db.Column(db.DateTime, default=lambda: datetime.datetime.now(pytz.timezone('Asia/Seoul')))
 
@@ -53,18 +56,16 @@ class TagPosition(db.Model):
 with app.app_context():
     db.create_all()
 
-# 앵커 위치 정의 (단위: 미터)
 anchor_positions = [
-    (0.0, 0.0),    # Anchor 1 위치
-    (3.0, 0.0),    # Anchor 2 위치
-    (3.0, 2.0),    # Anchor 3 위치
-    (0.0, 2.0)     # Anchor 4 위치
+    (0.0, 0.0),    
+    (3.0, 0.0),    
+    (3.0, 2.0),    
+    (0.0, 2.0)     
 ]
 
 @app.route('/api/timestamps', methods=['POST'])
 def receive_timestamp():
     data = request.get_json()
-    # app.logger.debug(f"Received timestamp data: {data}")
 
     if not data:
         app.logger.error("No data provided")
@@ -72,38 +73,29 @@ def receive_timestamp():
     
     anchor_id = data.get('anchor_id')
     timestamp = data.get('timestamp')
-    frame_type = data.get('frame_type')  # 'sync' or 'tag'
+    frame_type = data.get('frame_type')  
     sequence_number = data.get('sequence_number')
 
     if not anchor_id or timestamp is None or not frame_type or sequence_number is None:
         app.logger.error("Missing data fields")
         return jsonify({'message': 'Missing data fields'}), 400
 
-    # 이전 타임스탬프 가져오기
     previous_entry_ts = Timestamp.query.filter_by(anchor_id=anchor_id).order_by(Timestamp.id.desc()).first()
 
     if previous_entry_ts:
         previous_timestamp = previous_entry_ts.timestamp
-
-        # 타임스탬프를 직선화
         timestamp = linearize_timestamp(timestamp, previous_timestamp)
     else:
-        # 이전 데이터가 없으면 첫 번째 데이터이므로, 그대로 사용
         timestamp = timestamp
 
-    # 이전 시퀀스 번호 가져오기
-    previous_entry = Timestamp.query.filter_by(anchor_id=anchor_id, frame_type = frame_type ).order_by(Timestamp.id.desc()).first()
+    previous_entry = Timestamp.query.filter_by(anchor_id=anchor_id, frame_type=frame_type).order_by(Timestamp.id.desc()).first()
 
     if previous_entry:
         previous_sequence_number = previous_entry.sequence_number
-
-        # 시퀀스 번호와 타임스탬프를 직선화
         sequence_number = linearize_sequence_number(sequence_number, previous_sequence_number)
     else:
-        # 이전 데이터가 없으면 첫 번째 데이터이므로, 그대로 사용
         sequence_number = sequence_number
 
-    # 직선화된 값을 사용해 새로운 타임스탬프를 DB에 추가
     new_timestamp = Timestamp(anchor_id=anchor_id, timestamp=timestamp, frame_type=frame_type, sequence_number=sequence_number)
     db.session.add(new_timestamp)
     db.session.commit()
@@ -120,7 +112,6 @@ def receive_timestamp():
 def calculate_position_if_all_anchors_received(sequence_number):
     tag_timestamps = Timestamp.query.filter_by(frame_type='tag', sequence_number=sequence_number).all()
     if len(tag_timestamps) < len(anchor_positions):
-        # app.logger.debug(f"Not all anchors have received the tag signal for sequence number {sequence_number}")
         return
 
     timestamps_dict = {t.anchor_id: t.timestamp for t in tag_timestamps}
@@ -148,14 +139,12 @@ def calculate_and_send_position(sequence_number, timestamps_dict):
 
 def linearize_sequence_number(current_seq, previous_seq, rollover_limit=256):
     if current_seq < previous_seq:
-        # 롤오버가 발생했으므로 256의 배수를 더해줍니다.
         rollover_count = (previous_seq - current_seq) // rollover_limit + 1
         return current_seq + rollover_limit * rollover_count
     return current_seq
 
 def linearize_timestamp(timestamp, prev_timestamp, rollover_limit=(1 << 40)):
     if timestamp < prev_timestamp:
-        # 롤오버가 발생한 경우 처리
         rollover_count = (prev_timestamp - timestamp) // rollover_limit + 1
         adjusted_timestamp = timestamp + rollover_limit * rollover_count
         return adjusted_timestamp
@@ -173,7 +162,7 @@ def update_clock_model(anchor_id, sync_timestamps):
     k = ts_n_k.sequence_number
     k_minus_1 = ts_n_k_minus_1.sequence_number
     
-    tau_s = int(200 * 10**-3 / TIMESTAMP_CONVERSION_FACTOR)
+    tau_s = int(0.2 / TIMESTAMP_CONVERSION_FACTOR) # sec
 
     delta_k = k - k_minus_1
     tr_k = k * tau_s
@@ -187,7 +176,6 @@ def update_clock_model(anchor_id, sync_timestamps):
     clock_model = ClockModel.query.filter_by(anchor_id=anchor_id).first()
     if clock_model is None:
         clock_model = ClockModel(anchor_id=anchor_id, offset=E_n_k, drift=i_n_k)
-        # app.logger.debug(f"Created new clock model for anchor {anchor_id}: {clock_model}")
     else:
         clock_model.offset = E_n_k
         clock_model.drift = i_n_k
@@ -206,10 +194,42 @@ def calculate_positioning_timestamp(anchor_id, tag_timestamp, sync_timestamps):
     E_n_i = clock_model.offset + clock_model.drift * (tag_timestamp.timestamp - ts_n_k.timestamp)
 
     corrected_timestamp = tag_timestamp.timestamp - E_n_i
-    # app.logger.debug(f"Calculated E_n_i for anchor {anchor_id}: {E_n_i}")
     app.logger.debug(f"Calculated corrected timestamp for anchor {anchor_id}: {corrected_timestamp}")
 
     return corrected_timestamp
+
+def plot_all_positions():
+    positions = TagPosition.query.all()
+
+    plt.figure(figsize=(5, 5))
+
+    # 태그 위치들을 빨간 점으로 표시
+    for position in positions:
+        plt.plot(position.x, position.y, 'ro')
+
+    # 앵커 위치를 파란 점으로 표시
+    anchor_x = [pos[0] for pos in anchor_positions]
+    anchor_y = [pos[1] for pos in anchor_positions]
+    plt.plot(anchor_x, anchor_y, 'bo')  
+
+    plt.xlim(-1, 4)  
+    plt.ylim(-1, 3)  
+    plt.xlabel('X Position (m)')
+    plt.ylabel('Y Position (m)')
+    plt.title('Tag Positions')
+
+    img = io.BytesIO()
+    plt.savefig(img, format='png')
+    img.seek(0)
+    plot_url = base64.b64encode(img.getvalue()).decode('utf8')
+    plt.close()
+
+    return plot_url
+
+@app.route('/positions')
+def show_all_positions():
+    plot_url = plot_all_positions()
+    return render_template('positions.html', plot_url=plot_url)
 
 @app.route('/api/calculate_position', methods=['POST'])
 def calculate_position():
@@ -254,6 +274,9 @@ def calculate_position():
 
     estimated_position = estimate_position(corrected_timestamps)
     x, y = estimated_position.tolist()
+    
+    app.logger.debug(f"Estimated Position: x={x}, y={y}")
+
 
     new_tag_position = TagPosition(tag_id=tag_id, x=x, y=y, timestamp=int(datetime.datetime.now().timestamp()))
     db.session.add(new_tag_position)
@@ -268,11 +291,12 @@ def h(si, corrected_timestamps):
 
     for n in range(1, len(corrected_timestamps)):
         tn_i = corrected_timestamps[n]
-        diff = (tn_i - t1_i)* TIMESTAMP_CONVERSION_FACTOR
+        diff = (tn_i - t1_i) * TIMESTAMP_CONVERSION_FACTOR
         # print(diff)
         # app.logger.debug(f"tn_i  anchor {n+1}: {tn_i}")
         # app.logger.debug(f"t1_i for anchor {n+1}: {t1_i}")
         # app.logger.debug(f"Time difference (tn_i - t1_i) for anchor {n+1}: {tn_i - t1_i}")
+        # app.logger.debug(f"distance {n+1}: {c*diff}")
         h_vec.append(c * diff )
 
     # app.logger.debug(f"h vector: {h_vec}")
@@ -309,10 +333,11 @@ def ekf_update(si, corrected_timestamps):
     return residual
 
 def estimate_position(corrected_timestamps):
-    initial_guess = [1.5,1]
+    initial_guess = [1.5,2]
     result = least_squares(ekf_update, initial_guess, args=(corrected_timestamps,))
 
     return result.x
+
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000, debug=True)
